@@ -14,6 +14,81 @@ This Auth0 Action implements a workaround solution that enables passkey enrollme
 
 **The Result:** Users with custom database accounts (import mode off) can enroll passkeys through an Auth0 form and subsequently use those passkeys to authenticate with their primary account.
 
+## Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Auth0
+    participant Action as Post-Login Action
+    participant Form as Custom Form
+    participant ManagementAPI as Management API
+    participant MyAccountAPI as My Account API (/me)
+    participant WebAuthn as Browser WebAuthn
+
+    User->>Auth0: Login (Custom DB)
+    Auth0->>Action: Trigger onExecutePostLogin
+    
+    Note over Action: STEP 1: Check/Create _pk Identity
+    Action->>Action: hasPasskeyIdentity()?
+    alt No _pk identity exists
+        Action->>ManagementAPI: Create user in noimport-workaround-db
+        ManagementAPI-->>Action: New user created (user_id: xxx_pk)
+        Action->>ManagementAPI: Link _pk identity to primary user
+        ManagementAPI-->>Action: Identities linked
+    else _pk identity exists
+        Action->>Action: Skip creation
+    end
+    
+    Note over Action: STEP 2: Token Exchange
+    Action->>Auth0: Token exchange (grant_type: token-exchange)
+    Auth0-->>Action: Access token (scope: create:me:authentication_methods)
+    
+    Note over Action: STEP 3: Render Form
+    Action->>Auth0: api.prompt.render('ap_oVkpPNyPhkixNKZVno3cVa')
+    Auth0->>User: Redirect to custom form
+    Note over Action: onExecutePostLogin completes
+    
+    Note over Form,WebAuthn: STEP 4: Passkey Enrollment
+    User->>Form: Click "Create a Passkey"
+    Form->>MyAccountAPI: POST /me/v1/authentication-methods
+    Note right of Form: Body: {type: "passkey",<br/>connection: "noimport-workaround-db",<br/>identity_user_id: "xxx_pk"}
+    MyAccountAPI-->>Form: Challenge + auth_session
+    Form->>WebAuthn: navigator.credentials.create()
+    WebAuthn->>User: Show biometric/PIN prompt
+    User->>WebAuthn: Authenticate
+    WebAuthn-->>Form: Credential created
+    Form->>MyAccountAPI: POST /me/v1/authentication-methods/passkey|new/verify
+    Note right of Form: Body: {auth_session, authn_response}
+    MyAccountAPI-->>Form: Passkey verified + id_token
+    Form->>Form: Show success message
+    Form->>User: Auto-proceed (or show Continue button)
+    User->>Form: Continue
+    Form->>Auth0: context.form.goForward()
+    
+    Auth0->>Action: Trigger onContinuePostLogin
+    
+    Note over Action: STEP 5: Transfer Passkey
+    Action->>ManagementAPI: GET /users/{id}/authentication-methods
+    ManagementAPI-->>Action: List of auth methods
+    Action->>Action: Find passkeys with identity_user_id ending in "_pk"
+    
+    loop For each _pk passkey
+        Action->>Action: Extract passkey data
+        Action->>Action: Update identity_user_id (remove "_pk")
+        Action->>ManagementAPI: DELETE /authentication-methods/{id}
+        ManagementAPI-->>Action: Passkey deleted
+        Action->>Action: Wait 1 second
+        Action->>ManagementAPI: POST /authentication-methods
+        Note right of Action: Body: passkey data with<br/>updated identity_user_id
+        ManagementAPI-->>Action: Passkey recreated
+    end
+    
+    Note over Action: Passkeys now on primary identity
+    Action-->>Auth0: Login complete
+    Auth0-->>User: Authentication successful
+```
+
 ## Trigger
 
 **Post Login** - This action executes during the authentication flow after a user successfully logs in.
